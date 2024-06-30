@@ -3,149 +3,119 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <ctime>
+#include <cstdlib>
+#include "table.h"
+#include "util.h"
+#include "sa/sa.h"
+#include "policy/randomNChange.h"
+#include "policy/pickBest.h"
 
-using namespace std;
+#define BASE_EPOCH 1000000
 
+// 숫자 한번 변경할 때 최대 2048번의 count의 변화 생김 (updateTable)
+// 숫자 변경 후 updateScore 사용해야 점수 업데이트 함
 
-class Table {
-
-private:
-    int digits[8][14];
-    int nScore;
-    int cScore;
-
-    int numberCounts[10000]; // 각 수의 만들 수 있는 개수
-    vector<int> madeNumbers; // 만들어진 수들. 각 수의 인덱스는 dfs로 찾은 순서에 해당
-    vector<int> usedIndices[8][14][4]; // 그 칸의 수가 [3,2,1,0]번째 자리로 사용되어 만들어진 수의 인덱스들(dfs로 찾은 순서)\
-
-    void fillTableRandomly() {
-
-    }
-
-    void dfs(int r, int c, int num, int depth, int route[4][2]) {
-        num = num * 10 + digits[r][c];
-        route[depth][0] = r;
-        route[depth][1] = c;
-
-        if (depth == 3) {
-            numberCounts[num]++;
-            madeNumbers.push_back(num);
-            int idx = madeNumbers.size() - 1;
-            for (; depth >= 0; depth--)
-                usedIndices[route[depth][0]][route[depth][1]][depth].push_back(idx);
-
-            return;
-        }
-
-        if (r > 0) dfs(r-1, c, num, depth+1, route);
-        if (r < 7) dfs(r+1, c, num, depth+1, route);
-        if (c > 0) dfs(r, c-1, num, depth+1, route);
-        if (c < 13) dfs(r, c+1, num, depth+1, route);
-        if (r > 0 && c > 0) dfs(r-1, c-1, num, depth+1, route);
-        if (r > 0 && c < 13) dfs(r-1, c+1, num, depth+1, route);
-        if (r < 7 && c > 0) dfs(r+1, c-1, num, depth+1, route);
-        if (r < 7 && c < 13) dfs(r+1, c+1, num, depth+1, route);
-    }
-
-    void initScore() {
-        int route[4][2];
-
-        for (int r = 0; r < 8; r++)
-            for (int c = 0; c < 14; c++)
-                dfs(r, c, 0, 0, route);
-        
-        updateScore();
-    }
-
-    // 속도 증가 위해 함수 없앨 수도 있음
-    int base[4] = {1000, 100, 10, 1};
-    int getNewNumber(int num, int depth, int newDigit) {
-        return num + (newDigit - num / base[depth] % 10) * base[depth];
-    }
+int maxNormalScore;
+int maxCountScore;
+string maxNormalScoreTable;
+string maxCountScoreTable;
+int maxNormalScoreAt;
+int maxCountScoreAt;
 
 
-public:
-
-    Table(string input) {
-        if (input.size() == 0) {
-            fillTableRandomly();
-            initScore();
-            return;
-        }
-
-        int idx = 0;
-        for (char c: input) {
-            if (idx == 8*14) {
-                cout << "INVALID INPUT\n";
-                exit(0);    
-            }
-
-            if ('0' <= c && c <= '9') {
-                digits[idx/14][idx%14] = c - '0';
-                idx++;
-            }
-        }
-
-        if (idx != 8*14) {
-            cout << "INVALID INPUT\n";
-            exit(0);
-        }
-
-        initScore();
-    }
-
-    void updateTable(int r, int c, int newDigit) {
-        int newNumber;
-
-        for (int d = 3; d >= 0; d--) {
-            for (auto idx: usedIndices[r][c][d]) {
-                numberCounts[madeNumbers[idx]]--;
-                newNumber = getNewNumber(madeNumbers[idx], d, newDigit);
-
-                numberCounts[newNumber]++;
-                madeNumbers[idx] = newNumber;
-            }
-        }
-    }
-
-    void updateScore() {
-        // evaluate normal score
-        nScore = 9999;
-        for (int num = 1000; num < 10000; num++) {
-            if (numberCounts[num] == 0) {
-                nScore = num - 1;
-                break;
-            }
-        }
-
-        // evaluate count score
-        cScore = 0;
-        for (int num = 1000; num < 10000; num++)
-            cScore += (numberCounts[num] > 0);
-    }
-
-    int getNormalScore() {
-        return nScore;
-    }
-
-    int getCountScore() {
-        return cScore;
-    }
-};
-
-int main() {
-    string path = "input/1.in";
+string readInput(string path) {
     ifstream file(path);
     stringstream buffer;
     buffer << file.rdbuf();
-    string input = buffer.str();
     file.close();
 
-    Table table = Table(input);
+    return buffer.str();
+}
 
-    // 이제 변경 정책만 만들면 된다!
-    // 숫자 한번 변경할 때 최대 2048번의 count의 변화 생김 (updateTable)
-    // 숫자 변경 후 updateScore 사용해야 점수 업데이트 함
+// 이 부분을 수정해서 step마다의 정책을 결정
+void doPolicy(Table& table, SimulatedAnnealing& sa, int step) {
+    if (step % 50 == 0) { // 업데이트가 일정 스텝 없으면 수행하는 것이 좋을 듯
+        // forcedRandomSwap(table);
+        forcedRandomChange(table);
+        forcedRandomChange(table);
+    }
+    else {
+        // randomChange(table, sa);
+        pickBestChange(table, sa);
+    }
+}
+
+void startEmulator(Table& table, SimulatedAnnealing& sa, int epoch) {
+    int nScore;
+    int cScore;
+    bool bMaxScoreUpdated;
+
+    for (int step = 1; step <= epoch; step++) {
+        doPolicy(table, sa ,step);
+
+        nScore = table.getNormalScore();
+        cScore = table.getCountScore();
+
+        bMaxScoreUpdated = false;
+        if (nScore > maxNormalScore) {
+            maxNormalScore = nScore;
+            maxNormalScoreTable = table.getTableAsString();
+            maxNormalScoreAt = step;
+            bMaxScoreUpdated = true;
+        }
+        if (cScore > maxCountScore) {
+            maxCountScore = cScore;
+            maxCountScoreTable = table.getTableAsString();
+            maxCountScoreAt = step;
+            bMaxScoreUpdated = true;
+        }
+
+        if (bMaxScoreUpdated) {
+            cout << "-----[New Max Score]-----\n";
+            cout << "Normal score: " << nScore << '\n';
+            cout << "Count score: " << cScore << '\n';
+            cout << table.getTableAsString();
+        } else if (step % 100 == 0) {
+            cout << "-----[STEP " << step << "]-----\n";
+            cout << "Normal score: " << nScore << '\n';
+            cout << "Count score: " << cScore << '\n';
+            cout << table.getTableAsString();
+        }
+
+        if (maxCountScore == 9000)
+            break;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    srand(time(0));
+
+    string path = "input/8898.in";
+    int epoch = BASE_EPOCH; 
+    if (argc >= 2) path = string(argv[1]);
+    if (argc >= 3) epoch = atoi(argv[2]);
+
+    string input = readInput(path);
+    
+
+    Table table = Table(input);
+    // maxNormalScore = table.getNormalScore();
+    // maxCountScore = table.getCountScore();
+
+    cout << "Initial normal score: " << maxNormalScore << '\n';
+    cout << "Initial count score: " << maxCountScore << '\n';
+    table.getTableAsString();
+
+    SimulatedAnnealing sa = SimulatedAnnealing();
+
+    startEmulator(table, sa, epoch);
+
+    cout << "\n\nTotal accecption count: " << sa.accCount << '\n';
+    cout << "Best Normal Score: " << maxNormalScore << " at " << maxNormalScoreAt << '\n';
+    cout << maxNormalScoreTable;
+    cout << "Best Count Score: " << maxCountScore <<  " at " << maxCountScoreAt << '\n';
+    cout << maxCountScoreTable;
 
     return 0;
 }
